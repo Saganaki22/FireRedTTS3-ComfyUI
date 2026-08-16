@@ -2,7 +2,7 @@
 
 **[English](./README.md)** | **中文**
 
-**版本：v0.2.0**
+**版本：v0.2.3**
 
 [FireRedTeam/FireRedTTS3](https://huggingface.co/FireRedTeam/FireRedTTS3) 的 ComfyUI 节点：24 种语言 + 21 种中文方言的零样本语音克隆、指令驱动的音色设计、语义 + 声学语音编辑、Whisper 参考音频转写，以及 ComfyUI/AIMDO DynamicVRAM 动态显存支持。
 
@@ -23,6 +23,7 @@
 - **语音编辑** - 语义编辑（插入/删除/替换词语，返回改写文本）与声学编辑（语速 0.5-2.0 倍、音高 ±6 步、音量 0.3-2.0 倍），使用官方训练模板。
 - **内置文本前端** - 本地 wetext 中英文正则化（数字、日期、单位转口语），自动分句 + 交叉淡入淡出拼接。不调用任何外部 API。
 - **ComfyUI AUDIO 输入输出** - 参考音频、编辑输入与生成音频均使用标准 ComfyUI `AUDIO`。
+- **流步进优化** - 时间步嵌入、逐块 AdaLN 调制参数与旋转频率在每次生成时只计算一次（而非每个 patch 都重算），并预分配生成缓冲：速度提升约 11-16%，输出逐位一致（同种子 A/B 验证）。
 - **AIMDO DynamicVRAM 支持** - 核心模型、编解码器、说话人编码器分别注册为 ComfyUI 模型，权重可转换分页，DynamicVRAM 激活时自动接管。
 - **bf16 镜像** - 可选的半体积权重，与官方混合精度一致：主干 LLM 与 RedAE 编码器存为 bf16（官方推理本就在 bf16 autocast 下计算），流匹配头与 RedAE 解码器保持 fp32。同种子测试输出与 fp32 版本一致（SNR > 80 dB）。
 - **INT8 ConvRot 权重（实验性）** - `FireRedTTS3-int8` 镜像内置已量化的核心 transformer 线性层（Comfy INT8 ConvRot：格式 `int8_tensorwise`、逐行 fp32 缩放、离线 Hadamard 权重旋转、group size 256，使用官方 comfy-kitchen 量化器）。加载器自动识别 `*.comfy_quant` 键并通过 `comfy_kitchen.int8_linear(convrot=True)` 在线旋转激活执行；其余层（嵌入、边界投影、stop_head、Conv1d、RedAE、CAM++）保持浮点。321/332 线性层 → 检查点 7.90 → 3.07 GiB，输出质量已验证。

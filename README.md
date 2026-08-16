@@ -5,7 +5,7 @@
 
 **English** | **[中文](./README_zh.md)**
 
-**Version: v0.2.0**
+**Version: v0.2.3**
 
 ComfyUI nodes for [FireRedTeam/FireRedTTS3](https://huggingface.co/FireRedTeam/FireRedTTS3): zero-shot voice cloning across 24 languages and 21 Chinese dialects, instruction-based voice design, semantic + acoustic speech editing, Whisper reference transcription, and ComfyUI/AIMDO DynamicVRAM support.
 
@@ -25,6 +25,7 @@ ComfyUI nodes for [FireRedTeam/FireRedTTS3](https://huggingface.co/FireRedTeam/F
 - **Speech editing** - Semantic editing (insert/delete/replace words, returns the rewritten text) and acoustic editing (speed 0.5-2.0x, pitch ±6 steps, volume 0.3-2.0x) via the trained instruction templates.
 - **Text frontend included** - Local `wetext` normalization for Chinese/English (numbers, dates, units to spoken form), sentence splitting with cross-fade joins. No external API calls.
 - **ComfyUI AUDIO in/out** - Reference voices, edit inputs, and generated audio all use standard ComfyUI `AUDIO`.
+- **Optimized flow stepping** - timestep embeddings, per-block AdaLN modulations, and rotary frequencies are computed once per generation instead of once per patch, and the generation buffers are preallocated: ~11-16% faster with bit-identical output (verified by same-seed A/B).
 - **AIMDO DynamicVRAM support** - Core, codec, and speaker encoder are registered as separate ComfyUI models with castable weights, paging through ComfyUI/AIMDO when DynamicVRAM is active.
 - **bf16 mirror** - Optional half-size weights with official-equivalent mixed precision: the backbone LLM and RedAE encoder are stored in bf16 (the official code already computes them under bf16 autocast), while the flow head and RedAE decoder stay fp32. Same-seed A/B testing against the official fp32 weights produced identical waveforms (cosine 1.0000, SNR > 80 dB).
 - **Whisper transcription node** - Turns a reference clip into the `prompt_text` transcript that noticeably improves cloning.

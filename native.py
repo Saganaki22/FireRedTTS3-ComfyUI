@@ -114,13 +114,20 @@ class RotaryEmbedding(nn.Module):
         self.register_buffer("inv_freq", inv_freq, persistent=False)
         assert interpolation_factor >= 1.0
         self.interpolation_factor = interpolation_factor
+        self._seq_len_cache = {}
 
     def rope_init(self):
         self.inv_freq = 1.0 / (self._rope_base ** (torch.arange(0, self._rope_dim, 2).float() / self._rope_dim))
+        self._seq_len_cache = {}
 
     def forward_from_seq_len(self, seq_len):
-        t = torch.arange(seq_len, device=self.inv_freq.device)
-        return self.forward(t)
+        key = (int(seq_len), str(self.inv_freq.device), self.inv_freq.dtype)
+        cached = self._seq_len_cache.get(key)
+        if cached is None:
+            t = torch.arange(seq_len, device=self.inv_freq.device)
+            cached = self.forward(t)
+            self._seq_len_cache[key] = cached
+        return cached
 
     @torch.autocast("cuda", enabled=False)
     def forward(self, t, offset=0):
@@ -299,10 +306,12 @@ class FlowDiTBlock(nn.Module):
         self.mlp = FeedForward(dim=hidden_size, mult=mlp_ratio, dropout=dropout, approximate="tanh")
         self.adaLN_modulation = nn.Sequential(nn.SiLU(), nn.Linear(hidden_size, 9 * hidden_size))
 
-    def forward(self, x, c, mask, rope):
+    def forward(self, x, c, mask, rope, ada=None):
+        if ada is None:
+            ada = self.adaLN_modulation(c).chunk(9, dim=-1)
         (shift_msa, scale_msa, gate_msa,
          shift_mlp, scale_mlp, gate_mlp,
-         shift_conv, scale_conv, gate_conv) = self.adaLN_modulation(c).chunk(9, dim=-1)
+         shift_conv, scale_conv, gate_conv) = ada
         x = x + gate_msa * self.attn(_modulate(self.norm1(x), shift_msa, scale_msa), mask=mask, rope=rope)
         x = x + gate_conv * self.conv(_modulate(self.norm2(x), shift_conv, scale_conv), mask=mask)
         x = x + gate_mlp * self.mlp(_modulate(self.norm3(x), shift_mlp, scale_mlp))
@@ -318,8 +327,10 @@ class AdaLNFinalLayer(nn.Module):
         self.norm_final = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
         self.linear = nn.Linear(hidden_size, out_channels, bias=True)
 
-    def forward(self, x, c):
-        shift, scale = self.adaLN_modulation(c).chunk(2, dim=-1)
+    def forward(self, x, c, ada=None):
+        if ada is None:
+            ada = self.adaLN_modulation(c).chunk(2, dim=-1)
+        shift, scale = ada
         return self.linear(_modulate(self.norm_final(x), shift, scale))
 
 
@@ -878,6 +889,26 @@ class CamppEmbedding(nn.Module):
 # --------------------------------------------------------------------------- #
 # TTS cores (upstream llm/fireredtts3_base.py + fireredtts3_instruct.py)
 # --------------------------------------------------------------------------- #
+# Hoisted flow-step constants. Timestep embeds, per-block AdaLN modulations and
+# rotary frequencies are identical for every patch of a generation; computing
+# them once and slicing per step removes ~500 kernel launches per patch.
+# --------------------------------------------------------------------------- #
+def _dit_flow_constants(core, t_span):
+    steps = t_span[:-1].reshape(-1)
+    t_embs = core.dit.t_embedder(steps)
+    adas = torch.stack([block.adaLN_modulation(t_embs) for block in core.dit.blocks])
+    final_ada = core.dit.final_layer.adaLN_modulation(t_embs)
+    rope = core.dit.rotary_embed.forward_from_seq_len(core.history_length + core.patch_size)
+    return adas, final_ada, rope
+
+
+def _dit_step_impl(core, x_in, adas_step, final_step, rope):
+    x = core.dit.in_proj(x_in)
+    for index, block in enumerate(core.dit.blocks):
+        x = block(x, None, None, rope, ada=adas_step[index].chunk(9, dim=-1))
+    return core.dit.final_layer(x, None, ada=final_step.chunk(2, dim=-1))
+
+
 def _backbone_config(attn_implementation: str):
     from transformers import Qwen3Config
 
@@ -935,22 +966,27 @@ class FireRedTTS3BaseCore(nn.Module):
         # .float() matches upstream numerics (fp32 RMSNorm promotion under autocast)
         return outs.last_hidden_state.float(), outs.past_key_values
 
-    def _flow_one_step(self, hist_latents, backbone_cond, spk_cond, t_span, inference_cfg):
+    def _flow_constants(self, t_span):
+        return _dit_flow_constants(self, t_span)
+
+    def _dit_step(self, x_in, adas_step, final_step, rope):
+        return _dit_step_impl(self, x_in, adas_step, final_step, rope)
+
+    def _flow_one_step(self, hist_latents, backbone_cond, spk_cond, t_span, inference_cfg, flow_consts):
+        adas, final_ada, rope = flow_consts
         x0 = torch.randn(1, self.patch_size, self.redae_dim, device=hist_latents.device)
         xt = torch.cat([hist_latents, x0], dim=1)
         cond = torch.cat([
             backbone_cond.repeat_interleave(self.patch_size, dim=1),
             spk_cond.unsqueeze(1).repeat(1, self.history_length + self.patch_size, 1),
         ], dim=-1)
-        for ti, t in enumerate(t_span[:-1]):
-            dt = t_span[ti + 1] - t
-            t_in = t.view(-1, 1, 1)
+        zeros_cond = torch.zeros_like(cond) if inference_cfg > 0 else None
+        for ti in range(len(t_span) - 1):
+            dt = t_span[ti + 1] - t_span[ti]
             x_in = torch.cat([xt, cond], dim=2)
             if inference_cfg > 0:
-                x_in_cfg = torch.cat([xt, cond * 0], dim=2)
-                x_in = torch.cat([x_in, x_in_cfg], dim=0)
-                t_in = t_in.expand(2, -1, -1)
-            vt = self.dit(x=x_in, t=t_in)
+                x_in = torch.cat([x_in, torch.cat([xt, zeros_cond], dim=2)], dim=0)
+            vt = self._dit_step(x_in, adas[:, ti], final_ada[ti], rope)
             if inference_cfg > 0:
                 vt_cond, vt_cfg = vt.chunk(2, dim=0)
                 vt = (1.0 + inference_cfg) * vt_cond - inference_cfg * vt_cfg
@@ -968,12 +1004,20 @@ class FireRedTTS3BaseCore(nn.Module):
 
         t_span = torch.linspace(0, 1, n_timesteps + 1, device=device)
         t_span = 1 - torch.cos(t_span * 0.5 * torch.pi)
-        latents_gen = F.pad(prompt_latents, (0, 0, self.history_length, 0))
+        flow_consts = self._flow_constants(t_span)
         dit_spk_cond = self.spk_proj_dit(spk_emb.float())
 
-        backbone_cond = input_embeds.new_zeros(1, self.history_patches, input_embeds.shape[-1])
-        backbone_cache = None
         max_gen_steps = 400 if max_gen_steps is None else max_gen_steps
+        n_prompt = prompt_latents.shape[1]
+        latents_buf = prompt_latents.new_zeros(
+            1, self.history_length + n_prompt + max_gen_steps * self.patch_size, self.redae_dim)
+        latents_buf[:, self.history_length:self.history_length + n_prompt] = prompt_latents
+        latents_filled = self.history_length + n_prompt
+        n_prompt_patches = patch_prompt_latents.shape[1]
+        cond_buf = input_embeds.new_zeros(
+            1, self.history_patches + n_prompt_patches + max_gen_steps, input_embeds.shape[-1])
+        cond_filled = self.history_patches
+        backbone_cache = None
         terminal_progress = None
         if tqdm is not None:
             terminal_progress = tqdm(total=max_gen_steps, desc="FireRedTTS3 patches", unit="patch",
@@ -986,19 +1030,23 @@ class FireRedTTS3BaseCore(nn.Module):
                 if stop_score >= stop_threshold and (min_gen_steps is None or step_index >= min_gen_steps):
                     break
                 if step_index == 0:
-                    one_backbone_out = backbone_out[:, -patch_prompt_latents.shape[1]:]
+                    one_backbone_out = backbone_out[:, -n_prompt_patches:]
                 else:
                     one_backbone_out = backbone_out[:, -1:]
-                backbone_cond = torch.cat([backbone_cond, one_backbone_out], dim=1)
+                n_new = one_backbone_out.shape[1]
+                cond_buf[:, cond_filled:cond_filled + n_new] = one_backbone_out
+                cond_filled += n_new
                 one_latents = self._flow_one_step(
-                    hist_latents=latents_gen[:, -self.history_length:],
-                    backbone_cond=self.dit_head(backbone_cond[:, -(self.history_patches + 1):]),
+                    hist_latents=latents_buf[:, latents_filled - self.history_length:latents_filled],
+                    backbone_cond=self.dit_head(cond_buf[:, cond_filled - (self.history_patches + 1):cond_filled]),
                     spk_cond=dit_spk_cond,
                     t_span=t_span,
                     inference_cfg=inference_cfg,
+                    flow_consts=flow_consts,
                 )
                 input_embeds = self.patch_encoder(one_latents)
-                latents_gen = torch.cat([latents_gen, one_latents], dim=1)
+                latents_buf[:, latents_filled:latents_filled + self.patch_size] = one_latents
+                latents_filled += self.patch_size
                 if progress_callback is not None:
                     progress_callback(step_index + 1, max_gen_steps)
                 if terminal_progress is not None:
@@ -1008,7 +1056,7 @@ class FireRedTTS3BaseCore(nn.Module):
                 if terminal_progress.n < terminal_progress.total:
                     terminal_progress.total = terminal_progress.n
                 terminal_progress.close()
-        return latents_gen[:, self.history_length:]
+        return latents_buf[:, self.history_length:latents_filled]
 
 
 class FireRedTTS3InstructCore(nn.Module):
@@ -1052,19 +1100,24 @@ class FireRedTTS3InstructCore(nn.Module):
             outs = self.backbone_llm.model(inputs_embeds=input_embeds, use_cache=True, past_key_values=cache)
         return outs.last_hidden_state.float(), outs.past_key_values
 
-    def _flow_one_step(self, hist_latents, backbone_cond, t_span, inference_cfg):
+    def _flow_constants(self, t_span):
+        return _dit_flow_constants(self, t_span)
+
+    def _dit_step(self, x_in, adas_step, final_step, rope):
+        return _dit_step_impl(self, x_in, adas_step, final_step, rope)
+
+    def _flow_one_step(self, hist_latents, backbone_cond, t_span, inference_cfg, flow_consts):
+        adas, final_ada, rope = flow_consts
         x0 = torch.randn(1, self.patch_size, self.redae_dim, device=hist_latents.device)
         xt = torch.cat([hist_latents, x0], dim=1)
         cond = backbone_cond.repeat_interleave(self.patch_size, dim=1)
-        for ti, t in enumerate(t_span[:-1]):
-            dt = t_span[ti + 1] - t
-            t_in = t.view(-1, 1, 1)
+        zeros_cond = torch.zeros_like(cond) if inference_cfg > 0 else None
+        for ti in range(len(t_span) - 1):
+            dt = t_span[ti + 1] - t_span[ti]
             x_in = torch.cat([xt, cond], dim=2)
             if inference_cfg > 0:
-                x_in_cfg = torch.cat([xt, cond * 0], dim=2)
-                x_in = torch.cat([x_in, x_in_cfg], dim=0)
-                t_in = t_in.expand(2, -1, -1)
-            vt = self.dit(x=x_in, t=t_in)
+                x_in = torch.cat([x_in, torch.cat([xt, zeros_cond], dim=2)], dim=0)
+            vt = self._dit_step(x_in, adas[:, ti], final_ada[ti], rope)
             if inference_cfg > 0:
                 vt_cond, vt_cfg = vt.chunk(2, dim=0)
                 vt = (1.0 + inference_cfg) * vt_cond - inference_cfg * vt_cfg
@@ -1106,6 +1159,7 @@ class FireRedTTS3InstructCore(nn.Module):
 
         t_span = torch.linspace(0, 1, n_timesteps + 1, device=device)
         t_span = 1 - torch.cos(t_span * 0.5 * torch.pi)
+        flow_consts = self._flow_constants(t_span)
         backbone_cache = None
 
         if infer_text:
@@ -1142,9 +1196,17 @@ class FireRedTTS3InstructCore(nn.Module):
             input_embeds = self._embed_tokens(next_token.unsqueeze(0))
             _, backbone_cache = self._backbone_one_step(input_embeds, cache=backbone_cache)
 
-        latents_gen = F.pad(latents_out, (0, 0, self.history_length, 0))
-        backbone_cond = input_embeds.new_zeros(1, self.history_patches, input_embeds.shape[-1])
         max_gen_steps = 400 if max_gen_steps is None else max_gen_steps
+        n_prompt = latents_out.shape[1]
+        latents_buf = latents_out.new_zeros(
+            1, self.history_length + n_prompt + max_gen_steps * self.patch_size, self.redae_dim)
+        if n_prompt:
+            latents_buf[:, self.history_length:self.history_length + n_prompt] = latents_out
+        latents_filled = self.history_length + n_prompt
+        n_prompt_patches = latents_patch_out.shape[1] if latents_patch_out is not None else 0
+        cond_buf = input_embeds.new_zeros(
+            1, self.history_patches + n_prompt_patches + max_gen_steps, input_embeds.shape[-1])
+        cond_filled = self.history_patches
         terminal_progress = None
         if tqdm is not None:
             terminal_progress = tqdm(total=max_gen_steps, desc="FireRedTTS3 patches", unit="patch",
@@ -1157,18 +1219,22 @@ class FireRedTTS3InstructCore(nn.Module):
                 if stop_score >= stop_threshold and (min_gen_steps is None or step_index >= min_gen_steps):
                     break
                 if step_index == 0 and latents_patch_out is not None:
-                    one_backbone_out = backbone_out[:, -latents_patch_out.shape[1]:]
+                    one_backbone_out = backbone_out[:, -n_prompt_patches:]
                 else:
                     one_backbone_out = backbone_out[:, -1:]
-                backbone_cond = torch.cat([backbone_cond, one_backbone_out], dim=1)
+                n_new = one_backbone_out.shape[1]
+                cond_buf[:, cond_filled:cond_filled + n_new] = one_backbone_out
+                cond_filled += n_new
                 one_latents = self._flow_one_step(
-                    hist_latents=latents_gen[:, -self.history_length:],
-                    backbone_cond=self.dit_head(backbone_cond[:, -(self.history_patches + 1):]),
+                    hist_latents=latents_buf[:, latents_filled - self.history_length:latents_filled],
+                    backbone_cond=self.dit_head(cond_buf[:, cond_filled - (self.history_patches + 1):cond_filled]),
                     t_span=t_span,
                     inference_cfg=inference_cfg,
+                    flow_consts=flow_consts,
                 )
                 input_embeds = self.patch_encoder(one_latents)
-                latents_gen = torch.cat([latents_gen, one_latents], dim=1)
+                latents_buf[:, latents_filled:latents_filled + self.patch_size] = one_latents
+                latents_filled += self.patch_size
                 if progress_callback is not None:
                     progress_callback(step_index + 1, max_gen_steps)
                 if terminal_progress is not None:
@@ -1178,7 +1244,7 @@ class FireRedTTS3InstructCore(nn.Module):
                 if terminal_progress.n < terminal_progress.total:
                     terminal_progress.total = terminal_progress.n
                 terminal_progress.close()
-        latents_gen = latents_gen[:, self.history_length:]
+        latents_gen = latents_buf[:, self.history_length:latents_filled]
         if infer_text:
             return latents_gen, text_gen_ids
         return latents_gen

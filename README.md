@@ -62,7 +62,7 @@ This nodepack is built for Transformers **5.3.0+** (tested on 5.3.0). It loads F
 | Feature | Language support |
 | --- | --- |
 | **Voice Clone (base)** | 24 languages + 21 Chinese dialects via explicit tag, or `auto` (FastText detection) |
-| **Voice Clone (instruct)** | Reliable for Chinese, English, and Cantonese only (best with a same-language reference). Other languages fail even with a native-language reference (verified: Greek reference + Greek text collapsed). Use the base model for all other languages. |
+| **Voice Clone (instruct)** | Reliable for Chinese and English. Cantonese is usable with a same-language reference but may degrade with cross-language references. Other languages fail even with a native-language reference (verified: Greek reference + Greek text collapsed) - use the base model for multilingual cloning. |
 | **Voice Design (instruct)** | Chinese and English only - an upstream limitation: with no reference audio and no language tag, the model has nothing to condition language on (its own benchmark only evaluates ZH/EN). For other languages, design the voice in English/Chinese, then clone that output with the base model and a language tag. |
 | **Semantic / Acoustic Edit (instruct)** | Inherits the input audio's language (verified: Greek audio edited at 1.5x speed keeps its Greek transcript). |
 

@@ -152,10 +152,6 @@ def _generate_clone_audio(
     cross_fade_ms: float,
 ) -> dict:
     resume_bundle_to_device(bundle)
-    if bundle.variant != "base" and language not in (None, "auto"):
-        logger.warning(
-            "language='%s' only applies to the base model; instruct cloning inherits the language "
-            "from the reference audio and ignores this selection.", language)
     waveform, sample_rate = native.comfy_audio_to_tensor(prompt_audio)
     text, language, sentences = bundle.frontend.apply(
         text,
@@ -165,6 +161,11 @@ def _generate_clone_audio(
         tokenize=lambda s: native.measure_tokens(bundle, s),
     )
     logger.info("%s cloning: %d sentence(s), language=%s", bundle.variant, len(sentences), language)
+    if bundle.variant != "base" and language not in ("Chinese", "English", "Cantonese"):
+        logger.warning(
+            "FireRedTTS3-Instruct cloning is unreliable for %s (verified: non-ZH/EN fails even with "
+            "a same-language reference). Switch the loader variant to fireredtts3_base for multilingual "
+            "voice cloning.", language)
 
     prompt_latents, prompt_audio_len = native.tokenize_prompt_audio(bundle, waveform, sample_rate)
     spk_emb = None

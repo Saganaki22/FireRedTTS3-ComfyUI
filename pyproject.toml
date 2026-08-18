@@ -1,7 +1,7 @@
 [project]
 name = "FireRedTTS3-ComfyUI"
 description = "ComfyUI custom nodes for FireRedTTS3: zero-shot voice cloning (24 languages + 21 Chinese dialects), voice design, and speech editing, with native inference and AIMDO DynamicVRAM support"
-version = "0.2.4"
+version = "0.2.5"
 license = {file = "LICENSE"}
 dependencies = [
     "accelerate",

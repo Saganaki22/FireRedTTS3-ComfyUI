@@ -2,7 +2,7 @@
 
 **[English](./README.md)** | **中文**
 
-**版本：v0.2.3**
+**版本：v0.2.4**
 
 [FireRedTeam/FireRedTTS3](https://huggingface.co/FireRedTeam/FireRedTTS3) 的 ComfyUI 节点：24 种语言 + 21 种中文方言的零样本语音克隆、指令驱动的音色设计、语义 + 声学语音编辑、Whisper 参考音频转写，以及 ComfyUI/AIMDO DynamicVRAM 动态显存支持。
 
@@ -54,6 +54,15 @@ Windows 本地环境：
 ## Transformers 兼容性
 
 本节点包基于 Transformers **5.3.0+** 构建（在 5.3.0 上测试通过）。它原生加载 FireRedTTS3 而不依赖远程代码 `AutoModel`：直接构建 Qwen3 主干、PatchEncoder、DiT 流匹配头与 RedAE 模块，并按原始键名映射 safetensors 权重。
+
+## 各功能语言支持
+
+| 功能 | 语言支持 |
+| --- | --- |
+| **音色克隆（base）** | 24 种语言 + 21 种中文方言，可显式选择标签或使用 `auto`（FastText 自动检测） |
+| **音色克隆（instruct）** | 从参考音频继承语言；语言下拉框会被忽略（会记录警告日志）。需要带标签的多语言克隆请使用 base 模型。 |
+| **声音设计（instruct）** | 仅中文和英文——上游模型的限制：没有参考音频也没有语言标签，模型没有任何语言条件可依（其官方基准也只评测中英）。其他语言请先用中/英文设计声音，再用 base 模型加语言标签克隆该输出。 |
+| **语义 / 声学编辑（instruct）** | 继承输入音频的语言（已验证：希腊语音频 1.5 倍速编辑后希腊语内容保持不变）。 |
 
 ## 模型文件
 

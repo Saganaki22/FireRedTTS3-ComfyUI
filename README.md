@@ -5,7 +5,7 @@
 
 **English** | **[中文](./README_zh.md)**
 
-**Version: v0.2.3**
+**Version: v0.2.4**
 
 ComfyUI nodes for [FireRedTeam/FireRedTTS3](https://huggingface.co/FireRedTeam/FireRedTTS3): zero-shot voice cloning across 24 languages and 21 Chinese dialects, instruction-based voice design, semantic + acoustic speech editing, Whisper reference transcription, and ComfyUI/AIMDO DynamicVRAM support.
 
@@ -56,6 +56,15 @@ Restart ComfyUI after installing or updating.
 ## Transformers Compatibility
 
 This nodepack is built for Transformers **5.3.0+** (tested on 5.3.0). It loads FireRedTTS3 natively instead of relying on a remote-code `AutoModel` path: the Qwen3 backbone, PatchEncoder, DiT flow head, and RedAE modules are constructed directly, and the safetensors weights are mapped in by their original key names.
+
+## Language Support by Feature
+
+| Feature | Language support |
+| --- | --- |
+| **Voice Clone (base)** | 24 languages + 21 Chinese dialects via explicit tag, or `auto` (FastText detection) |
+| **Voice Clone (instruct)** | Inherits the language from the reference audio; the language dropdown is ignored (a warning is logged). Use the base model for tagged multilingual cloning. |
+| **Voice Design (instruct)** | Chinese and English only - an upstream limitation: with no reference audio and no language tag, the model has nothing to condition language on (its own benchmark only evaluates ZH/EN). For other languages, design the voice in English/Chinese, then clone that output with the base model and a language tag. |
+| **Semantic / Acoustic Edit (instruct)** | Inherits the input audio's language (verified: Greek audio edited at 1.5x speed keeps its Greek transcript). |
 
 ## Model Files
 

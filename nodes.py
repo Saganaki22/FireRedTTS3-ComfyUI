@@ -152,6 +152,10 @@ def _generate_clone_audio(
     cross_fade_ms: float,
 ) -> dict:
     resume_bundle_to_device(bundle)
+    if bundle.variant != "base" and language not in (None, "auto"):
+        logger.warning(
+            "language='%s' only applies to the base model; instruct cloning inherits the language "
+            "from the reference audio and ignores this selection.", language)
     waveform, sample_rate = native.comfy_audio_to_tensor(prompt_audio)
     text, language, sentences = bundle.frontend.apply(
         text,
@@ -242,7 +246,7 @@ class FireRedTTS3LoadModel:
                     VARIANTS,
                     {
                         "default": "fireredtts3_instruct",
-                        "tooltip": "fireredtts3_base: zero-shot cloning with language tags. fireredtts3_instruct: cloning plus voice design and speech editing.",
+                        "tooltip": "base: zero-shot cloning in 24 languages + 21 Chinese dialects using language tags. instruct: voice design (Chinese/English only) + speech editing; its cloning inherits the language from the reference audio (no language tags).",
                     },
                 ),
                 "dtype": (
@@ -363,8 +367,8 @@ class FireRedTTS3VoiceDesign:
                 "Text to synthesize with the designed voice.",
             ),
             "language": (
-                LANGUAGE_CHOICES,
-                {"default": "auto", "tooltip": "Language of the text; used for text normalization only."},
+                ["auto", "Chinese", "English"],
+                {"default": "auto", "tooltip": "Language of the text; used for text normalization and sentence splitting only. Voice design synthesis itself only works reliably in Chinese/English (upstream limitation: no language conditioning without a reference clip); other languages produce accented/garbled speech. For other languages, design the voice in English/Chinese, then clone the result with the base model and a language tag."},
             ),
             "text_temperature": (
                 "FLOAT",

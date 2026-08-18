@@ -202,15 +202,18 @@ def resolve_device(device_name: str) -> torch.device:
         try:
             import comfy.model_management as mm
 
-            return torch.device(mm.get_torch_device())
+            device = torch.device(mm.get_torch_device())
         except Exception:
-            pass
-        if torch.cuda.is_available():
-            return torch.device("cuda")
-        return torch.device("cpu")
-    device = torch.device(device_name)
-    if device.type == "cuda" and not torch.cuda.is_available():
-        raise RuntimeError("CUDA was selected, but torch.cuda is not available.")
+            device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+    else:
+        device = torch.device(device_name)
+    if device.type == "cuda":
+        if not torch.cuda.is_available():
+            raise RuntimeError("CUDA was selected, but torch.cuda is not available.")
+        if device.index is None:
+            # Bare "cuda" has index None; comfy_aimdo's get_devctx(int(index)) needs
+            # an explicit index, so pin the current device (GitHub issue #1).
+            device = torch.device("cuda", torch.cuda.current_device())
     return device
 
 

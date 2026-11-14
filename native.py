@@ -1254,6 +1254,7 @@ class FireRedTTS3InstructCore(nn.Module):
 # ComfyUI castable module conversion (same approach as Higgs v3 node pack)
 # --------------------------------------------------------------------------- #
 class _ComfyLinear(nn.Linear):
+    _combined_linear = None
     comfy_cast_weights = True
     weight_function = []
     bias_function = []
@@ -1269,6 +1270,7 @@ class _ComfyLinear(nn.Linear):
 
 
 class _ComfyEmbedding(nn.Embedding):
+    _combined_linear = None
     comfy_cast_weights = True
     weight_function = []
     bias_function = []
@@ -1290,6 +1292,7 @@ class _ComfyEmbedding(nn.Embedding):
 
 
 class _ComfyConv1d(nn.Conv1d):
+    _combined_linear = None
     comfy_cast_weights = True
     weight_function = []
     bias_function = []
@@ -1306,6 +1309,7 @@ class _ComfyConv1d(nn.Conv1d):
 
 
 class _ComfyConv2d(nn.Conv2d):
+    _combined_linear = None
     comfy_cast_weights = True
     weight_function = []
     bias_function = []
